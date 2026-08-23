@@ -1,17 +1,67 @@
+/* ══════════════════════════════════════════════════════════════
+ *  Sanhia Roadmap — App Controller
+ *  Synchronisation temps réel via Firebase Realtime Database
+ * ══════════════════════════════════════════════════════════════ */
+
 /* ── Configuration ── */
 const USERS = {
   2252: { name: 'Daren', full: 'Daren Tiendrebeogo', role: 'Développeur principal' },
   3363: { name: 'Hassan', full: 'Hassan', role: 'Directeur marketing' }
 };
 const KEY = 'sanhia-roadmap-integrale-v2';
+const DB_PATH = 'roadmap-overrides';
 const $ = s => document.querySelector(s);
 
 let user = null;
-let overrides = JSON.parse(localStorage.getItem(KEY) || '{}');
+let overrides = {};
 let expanded = true;
-// Bug 6 fix: track per-phase collapse state so re-renders don't reset it
 let collapsed = new Set();
+let firebaseReady = false;
+let dbRef = null;
 
+/* ── Firebase Init ── */
+function initFirebase() {
+  try {
+    // Check if Firebase SDK and config are available
+    if (typeof firebase === 'undefined' || typeof FIREBASE_CONFIG === 'undefined') {
+      console.warn('⚠️ Firebase non configuré — mode localStorage uniquement');
+      return false;
+    }
+    // Check if config has real values (not placeholders)
+    if (FIREBASE_CONFIG.apiKey === 'COLLE_TA_CLE_ICI') {
+      console.warn('⚠️ Firebase: clés placeholder détectées — mode localStorage uniquement');
+      console.warn('   → Modifie firebase-config.js avec tes vraies clés Firebase');
+      return false;
+    }
+
+    firebase.initializeApp(FIREBASE_CONFIG);
+    const db = firebase.database();
+    dbRef = db.ref(DB_PATH);
+
+    // Listen for real-time changes from ALL clients
+    dbRef.on('value', snapshot => {
+      const data = snapshot.val();
+      overrides = data || {};
+      // Also keep localStorage in sync as fallback
+      localStorage.setItem(KEY, JSON.stringify(overrides));
+      render();
+    });
+
+    firebaseReady = true;
+    console.log('✅ Firebase connecté — synchronisation temps réel active');
+    return true;
+  } catch (err) {
+    console.error('❌ Erreur Firebase:', err);
+    return false;
+  }
+}
+
+// Initialize Firebase, fallback to localStorage
+if (!initFirebase()) {
+  overrides = JSON.parse(localStorage.getItem(KEY) || '{}');
+}
+
+/* ── Data Helper ── */
 const all = () => ROADMAP_DATA.flatMap(p =>
   p.steps.map(s => ({ ...s, phase: p.code, phaseName: p.name, ...(overrides[s.id] || {}) }))
 );
@@ -35,7 +85,22 @@ function start() {
   $('#userName').textContent = user.full;
   $('#role').textContent = user.role;
   $('#avatar').textContent = user.name.slice(0, 2).toUpperCase();
+  // Show sync status indicator
+  updateSyncStatus();
   render();
+}
+
+/* ── Sync Status ── */
+function updateSyncStatus() {
+  const el = $('#syncStatus');
+  if (!el) return;
+  if (firebaseReady) {
+    el.textContent = '● Sync temps réel';
+    el.style.color = '#0e9e73';
+  } else {
+    el.textContent = '○ Mode local';
+    el.style.color = '#d78b09';
+  }
 }
 
 /* ── Filters ── */
@@ -52,7 +117,6 @@ function render() {
   let items = all();
   let done = items.filter(x => x.status === 'done').length;
   let doing = items.filter(x => x.status === 'doing').length;
-  // Bug 5 fix: use items.length instead of hardcoded 64
   let total = items.length;
   let pct = Math.round(done / total * 100);
 
@@ -61,7 +125,6 @@ function render() {
   $('#pct').textContent = $('#statPct').textContent = pct + '%';
   $('#bar').style.width = pct + '%';
   $('#ring').style.strokeDashoffset = 314 - 314 * pct / 100;
-  // Bug 5 fix: update the total display dynamically
   if ($('#total')) $('#total').textContent = total;
   if ($('#phaseTotal')) $('#phaseTotal').textContent = ROADMAP_DATA.length;
   $('#phaseDone').textContent = ROADMAP_DATA.filter(p =>
@@ -83,7 +146,6 @@ function render() {
   $('#phases').innerHTML = ROADMAP_DATA.map(p => phaseHTML(p, filtered, items)).join('') ||
     '<div class="scope">Aucun résultat.</div>';
 
-  // Bug 2 fix: use correct regex (single backslash for \s) and handle literal \n in OUT_OF_SCOPE
   $('#scopeContent').innerHTML = markdownSimple(
     OUT_OF_SCOPE.replace(/^## Hors périmètre de cette roadmap\s*/, '')
   ).replace(/^<h3>.*?<\/h3>/, '');
@@ -96,9 +158,7 @@ function phaseHTML(p, filtered, items) {
   let pa = items.filter(x => x.phase === p.code);
   let d = pa.filter(x => x.status === 'done').length;
   let pc = Math.round(d / pa.length * 100);
-  // Bug 6 fix: use per-phase collapsed Set instead of global expanded boolean
   let isClosed = collapsed.has(p.code);
-  // Bug 9 fix: strip leading "> " from intro text (markdown blockquote syntax)
   let introText = esc(p.intro).replace(/^&gt;\s*/, '');
   return `<article class="phase ${isClosed ? 'closed' : ''}">` +
     `<div class="phase-head" onclick="togglePhase('${p.code}',this.parentElement)">` +
@@ -114,7 +174,6 @@ function phaseHTML(p, filtered, items) {
 /* ── Step HTML ── */
 function stepHTML(x) {
   let labels = { todo: 'Non commencé', doing: 'En cours', done: 'Terminé' };
-  // Bug 8 fix: render backtick-enclosed text as inline code
   let filesHtml = renderInlineCode(esc(x.files));
   let instructionsHtml = renderInlineCode(esc(x.instructions));
   let validationHtml = renderInlineCode(esc(x.validation));
@@ -180,13 +239,25 @@ $('#editForm').onsubmit = e => {
   save('Modification enregistrée');
 };
 
+/* ── Save: Firebase (primary) + localStorage (fallback) ── */
 function save(msg) {
-  localStorage.setItem(KEY, JSON.stringify(overrides));
-  render();
+  if (firebaseReady && dbRef) {
+    // Write to Firebase → the onValue listener will auto-trigger render() for ALL clients
+    dbRef.set(overrides).catch(err => {
+      console.error('Erreur sauvegarde Firebase:', err);
+      // Fallback to localStorage if Firebase write fails
+      localStorage.setItem(KEY, JSON.stringify(overrides));
+      render();
+    });
+  } else {
+    // No Firebase — use localStorage only (single-user mode)
+    localStorage.setItem(KEY, JSON.stringify(overrides));
+    render();
+  }
   toast(msg);
 }
 
-/* ── Bug 6 fix: per-phase toggle that persists across re-renders ── */
+/* ── Phase collapse toggle ── */
 window.togglePhase = (code, el) => {
   if (collapsed.has(code)) {
     collapsed.delete(code);
@@ -200,7 +271,6 @@ window.togglePhase = (code, el) => {
 $('#expand').onclick = () => {
   expanded = !expanded;
   $('#expand').textContent = expanded ? 'Tout réduire' : 'Tout développer';
-  // Bug 6 fix: update collapsed Set when using the global toggle
   if (expanded) {
     collapsed.clear();
   } else {
@@ -224,11 +294,9 @@ document.querySelectorAll('[data-go]').forEach(b =>
 );
 
 $('#reset').onclick = () => {
-  if (confirm('Réinitialiser le suivi local ?')) {
+  if (confirm('Réinitialiser TOUT le suivi ? Cette action est irréversible et affecte tous les utilisateurs.')) {
     overrides = {};
-    localStorage.removeItem(KEY);
-    render();
-    toast('Suivi réinitialisé');
+    save('Suivi réinitialisé');
   }
 };
 
@@ -250,7 +318,6 @@ function esc(v = '') {
   );
 }
 
-// Bug 8 fix: render `backtick` content as <code> inline elements
 function renderInlineCode(s) {
   return s.replace(/`([^`]+)`/g, '<code style="background:#eef3fa;padding:2px 5px;border-radius:4px;font-size:10px;color:#1a3a5c">$1</code>');
 }
@@ -261,13 +328,10 @@ function toast(t) {
   setTimeout(() => $('#toast').classList.remove('show'), 1800);
 }
 
-// Bug 2 fix: split on literal \n (matching the actual content of OUT_OF_SCOPE)
-// and handle markdown bold (**text**) and bullet points
 function markdownSimple(s) {
   let lines = s.split('\\n');
   let out = lines.map(l => {
     if (l.startsWith('- ')) {
-      // Render bold (**text**) inside list items
       let content = esc(l.slice(2)).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
       return '<li>' + content + '</li>';
     }
