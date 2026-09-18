@@ -135,6 +135,11 @@ function render() {
   let total = items.length;
   let pct = Math.round(done / total * 100);
 
+  $('#roadmapTotalLabel').textContent = total;
+  $('#roadmapPhaseLabel').textContent = ROADMAP_DATA.length;
+  $('#roadmapTotalInline').textContent = total;
+  $('#roadmapPhaseInline').textContent = ROADMAP_DATA.length;
+
   $('#done').textContent = done;
   $('#doing').textContent = doing;
   $('#pct').textContent = $('#statPct').textContent = pct + '%';
@@ -226,7 +231,7 @@ window.toggle = id => {
 
 window.edit = id => {
   let x = all().find(v => v.id === id);
-  $('#editId').value = id;
+  $('#editId').value = String(id);
   $('#editPhase').textContent = 'PHASE ' + x.phase;
   $('#editTitle').textContent = 'Étape ' + id + ' : ' + x.title;
   $('#editStatus').value = x.status;
@@ -239,7 +244,7 @@ $('#close').onclick = () => $('#editDialog').close();
 
 $('#editForm').onsubmit = e => {
   e.preventDefault();
-  let id = +$('#editId').value;
+  let id = $('#editId').value;
   let x = all().find(v => v.id === id);
   let status = $('#editStatus').value;
   overrides[id] = {
