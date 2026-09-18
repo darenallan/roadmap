@@ -13,6 +13,7 @@ const COMP_KEY = 'sanhia-composants-v1';
 const DB_PATH = 'roadmap-overrides';
 const COMP_DB_PATH = 'composant-overrides';
 const $ = s => document.querySelector(s);
+window.OUT_OF_SCOPE = window.OUT_OF_SCOPE || '## Hors périmètre de cette roadmap\n\nAucune annexe spécifique n’a été définie pour cette roadmap.';
 
 let user = null;
 let overrides = {};
@@ -166,8 +167,9 @@ function render() {
   $('#phases').innerHTML = ROADMAP_DATA.map(p => phaseHTML(p, filtered, items)).join('') ||
     '<div class="scope">Aucun résultat.</div>';
 
+  const scopeText = typeof OUT_OF_SCOPE === 'string' ? OUT_OF_SCOPE : '';
   $('#scopeContent').innerHTML = markdownSimple(
-    OUT_OF_SCOPE.replace(/^## Hors périmètre de cette roadmap\s*/, '')
+    scopeText.replace(/^## Hors périmètre de cette roadmap\s*/, '')
   ).replace(/^<h3>.*?<\/h3>/, '');
 }
 
