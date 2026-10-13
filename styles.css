@@ -57,6 +57,9 @@
 .comp-badge.comp-status-exist{background:#e4f7f0;color:#087354}
 .comp-badge.comp-status-partial{background:#e8ecff;color:#3b5bdb}
 .comp-badge.comp-status-trouve{background:#e4f7f0;color:#087354}
+.comp-badge.comp-status-ko{background:#fde8e8;color:#b42318}
+.comp-check.ko{background:#c0392b;border-color:#c0392b;color:white}
+.comp-check.ko:hover{background:#a93226}
 
 .comp-check{width:26px;height:26px;border:2px solid #cfd8e4;border-radius:7px;background:white;color:transparent;font-size:13px;display:grid;place-items:center;cursor:pointer;transition:.15s;padding:0;flex-shrink:0}
 .comp-check:hover{border-color:var(--green);background:#f0faf6}

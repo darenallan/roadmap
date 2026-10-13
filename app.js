@@ -6,12 +6,20 @@
 /* ── Configuration ── */
 const USERS = {
   2252: { name: 'Daren', full: 'Daren Tiendrebeogo', role: 'Développeur principal' },
-  3363: { name: 'Hassan', full: 'Hassan', role: 'Directeur marketing' }
+  3363: { name: 'Hassan', full: 'Hassan', role: 'Directeur marketing' },
+  8808: { name: 'Youssouf', full: 'Youssouf', role: 'Testeur' }
 };
 const KEY = 'sanhia-roadmap-integrale-v2';
 const COMP_KEY = 'sanhia-composants-v1';
 const DB_PATH = 'roadmap-overrides';
 const COMP_DB_PATH = 'composant-overrides';
+const CHECK_DB_PATH = 'checklist-overrides';
+const CHECK_KEY = 'sanhia-checklist-v1';
+const ROADMAP_MD = 'roadmap-universel.md';
+const CHECKLIST_MD = 'checklists.md';
+const CHECK_LABELS = { todo: 'À tester', ok: 'Validé ✓', ko: 'Échec ✗' };
+const CHECK_CLASS = { todo: 'comp-status-search', ok: 'comp-status-trouve', ko: 'comp-status-ko' };
+const CHECK_NEXT = { todo: 'ok', ok: 'ko', ko: 'todo' };
 const $ = s => document.querySelector(s);
 window.OUT_OF_SCOPE = window.OUT_OF_SCOPE || '## Hors périmètre de cette roadmap\n\nAucune annexe spécifique n’a été définie pour cette roadmap.';
 
@@ -23,7 +31,10 @@ let collapsed = new Set();
 let firebaseReady = false;
 let dbRef = null;
 let compDbRef = null;
-let currentPage = 'roadmap'; // 'roadmap' or 'composants'
+let currentPage = 'roadmap'; // 'roadmap', 'composants' or 'tests'
+let checklistDbRef = null;
+let checkOverrides = {};
+let checklistModules = [];
 
 /* ── Firebase Init ── */
 function initFirebase() {
@@ -61,6 +72,14 @@ function initFirebase() {
       renderComposants();
     });
 
+    // Listen for shared checklist results (tests validés / échecs)
+    checklistDbRef = db.ref(CHECK_DB_PATH);
+    checklistDbRef.on('value', snapshot => {
+      checkOverrides = snapshot.val() || {};
+      localStorage.setItem(CHECK_KEY, JSON.stringify(checkOverrides));
+      renderChecklists();
+    });
+
     firebaseReady = true;
     console.log('✅ Firebase connecté — synchronisation temps réel active');
     return true;
@@ -74,6 +93,7 @@ function initFirebase() {
 if (!initFirebase()) {
   overrides = JSON.parse(localStorage.getItem(KEY) || '{}');
   compOverrides = JSON.parse(localStorage.getItem(COMP_KEY) || '{}');
+  checkOverrides = JSON.parse(localStorage.getItem(CHECK_KEY) || '{}');
 }
 
 /* ── Data Helper ── */
@@ -104,6 +124,7 @@ function start() {
   updateSyncStatus();
   render();
   renderComposants();
+  renderChecklists();
 }
 
 /* ── Sync Status ── */
@@ -120,10 +141,6 @@ function updateSyncStatus() {
 }
 
 /* ── Filters ── */
-ROADMAP_DATA.forEach(p =>
-  $('#phaseFilter').insertAdjacentHTML('beforeend',
-    `<option value="${p.code}">Phase ${p.code} · ${esc(p.name)}</option>`)
-);
 ['search', 'phaseFilter', 'statusFilter'].forEach(id =>
   $('#' + id).addEventListener(id === 'search' ? 'input' : 'change', render)
 );
@@ -324,8 +341,18 @@ document.querySelectorAll('[data-go]').forEach(b =>
     let roadmapSections = document.querySelectorAll('.hero, .stats, #roadmap');
     let composantsPage = $('#composants');
     let scopeSection = $('#scope');
+    let testsPage = $('#tests');
+    testsPage.style.display = 'none';
 
-    if (target === 'composants') {
+    if (target === 'tests') {
+      // Show checklist de tests, hide roadmap and composants
+      roadmapSections.forEach(s => s.style.display = 'none');
+      scopeSection.style.display = 'none';
+      composantsPage.style.display = 'none';
+      testsPage.style.display = 'block';
+      currentPage = 'tests';
+      renderChecklists();
+    } else if (target === 'composants') {
       // Show composants, hide roadmap sections
       roadmapSections.forEach(s => s.style.display = 'none');
       scopeSection.style.display = 'none';
@@ -594,3 +621,207 @@ function markdownSimple(s) {
   }).join('');
   return '<div class="scope-content"><ul>' + out + '</ul></div>';
 }
+
+/* ══════════════════════════════════════════════════════════════
+ *  CHARGEMENT DES FICHIERS MARKDOWN
+ *  roadmap-universel.md et checklists.md sont lus au chargement
+ *  (poussés sur GitHub Pages). Repli sur roadmap-data.js si absent.
+ * ══════════════════════════════════════════════════════════════ */
+
+function fillPhaseFilter() {
+  const current = $('#phaseFilter').value || 'all';
+  $('#phaseFilter').innerHTML = '<option value="all">Toutes les phases</option>' +
+    ROADMAP_DATA.map(p => `<option value="${p.code}">Phase ${p.code} · ${esc(p.name)}</option>`).join('');
+  $('#phaseFilter').value = ROADMAP_DATA.some(p => p.code === current) ? current : 'all';
+}
+
+/* Format : "## Phase CODE · Nom", "> intro", "### ID : Titre", "- **Champ :** valeur" */
+function parseRoadmapMd(text) {
+  const FIELDS = {
+    'Objectif': 'objective', 'Fichiers': 'files', 'Instructions': 'instructions',
+    'Validation': 'validation', 'Statut original': 'originalStatus',
+    'Statut': 'status', 'Responsable': 'assignee', 'Note': 'note'
+  };
+  const phases = [];
+  let phase = null, step = null, field = null;
+  text.split(/\r?\n/).forEach(raw => {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^## Phase (\S+) · (.+)$/))) {
+      phase = { code: m[1], name: m[2].trim(), intro: '', steps: [] };
+      phases.push(phase);
+      step = null; field = null;
+    } else if ((m = line.match(/^### (\S+) : (.+)$/)) && phase) {
+      step = { id: m[1], title: m[2].trim(), objective: '', files: '', instructions: '',
+        validation: '', originalStatus: '', status: 'todo', assignee: '', note: '' };
+      phase.steps.push(step);
+      field = null;
+    } else if (!step && phase && (m = line.match(/^> (.*)$/))) {
+      phase.intro = phase.intro ? phase.intro + ' ' + m[1] : m[1];
+    } else if (step && (m = line.match(/^- \*\*(.+?) :\*\*\s*(.*)$/))) {
+      field = FIELDS[m[1].trim()] || null;
+      if (field) step[field] = m[2].trim();
+    } else if (step && field && line.trim()) {
+      step[field] = (step[field] + ' ' + line.trim()).trim();
+    }
+  });
+  phases.forEach(p => p.steps.forEach(s => {
+    if (!['todo', 'doing', 'done'].includes(s.status)) s.status = 'todo';
+  }));
+  return phases.filter(p => p.steps.length);
+}
+
+async function loadRoadmapMd() {
+  try {
+    const res = await fetch(`${ROADMAP_MD}?v=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const parsed = parseRoadmapMd(await res.text());
+    if (!parsed.length) throw new Error('aucune phase trouvée');
+    window.ROADMAP_DATA = parsed;
+    console.log(`✅ ${ROADMAP_MD} chargé — ${parsed.length} phases`);
+  } catch (err) {
+    console.warn(`⚠️ ${ROADMAP_MD} non chargé, repli sur roadmap-data.js :`, err.message);
+  }
+  fillPhaseFilter();
+  render();
+}
+
+/* Format : "## Module", puis "- [ ] ID | Titre | Attendu" */
+function parseChecklistMd(text) {
+  const modules = [];
+  let mod = null;
+  text.split(/\r?\n/).forEach(line => {
+    let m;
+    if ((m = line.match(/^## (.+)$/))) {
+      mod = { name: m[1].trim(), items: [] };
+      modules.push(mod);
+    } else if (mod && (m = line.match(/^- \[[ xX]\] (\S+) \| ([^|]+?) \| (.+)$/))) {
+      mod.items.push({ id: m[1], title: m[2].trim(), expected: m[3].trim(), module: mod.name });
+    }
+  });
+  return modules.filter(m => m.items.length);
+}
+
+async function loadChecklistMd() {
+  try {
+    const res = await fetch(`${CHECKLIST_MD}?v=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    checklistModules = parseChecklistMd(await res.text());
+    console.log(`✅ ${CHECKLIST_MD} chargé — ${checklistModules.length} modules`);
+  } catch (err) {
+    console.warn(`⚠️ ${CHECKLIST_MD} non chargé :`, err.message);
+  }
+  renderChecklists();
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  CHECKLIST DE TESTS — partagée via Firebase (checklist-overrides)
+ *  Cycle au clic : À tester → Validé → Échec → À tester
+ * ══════════════════════════════════════════════════════════════ */
+
+function allChecks() {
+  return checklistModules.flatMap(m => m.items.map(it => {
+    const ov = checkOverrides[it.id] || {};
+    return { ...it, status: ov.status || 'todo', checkedBy: ov.checkedBy || '', checkedAt: ov.checkedAt || '' };
+  }));
+}
+
+function renderChecklists() {
+  if (!$('#checklistSections')) return;
+  const items = allChecks();
+  const total = items.length;
+  const count = s => items.filter(i => i.status === s).length;
+  const ok = count('ok'), ko = count('ko'), todo = count('todo');
+  const pct = total ? Math.round(ok / total * 100) : 0;
+
+  $('#chkTotal').textContent = total;
+  $('#chkOk').textContent = ok;
+  $('#chkKo').textContent = ko;
+  $('#chkTodo').textContent = todo;
+  $('#chkPct').textContent = $('#chkStatPct').textContent = pct + '%';
+  $('#chkBar').style.width = pct + '%';
+  $('#chkRing').style.strokeDashoffset = 314 - 314 * pct / 100;
+
+  if (!checklistModules.length) {
+    $('#checklistSections').innerHTML = '<div class="scope" style="text-align:center;padding:40px">Aucune checklist chargée. Vérifie que <code>checklists.md</code> est présent à la racine du site.</div>';
+    return;
+  }
+
+  const q = $('#chkSearch').value.trim().toLowerCase();
+  const sf = $('#chkStatusFilter').value;
+
+  $('#checklistSections').innerHTML = checklistModules.map((m, idx) => {
+    const its = items.filter(i => i.module === m.name);
+    const shown = its.filter(i => (sf === 'all' || i.status === sf) &&
+      [i.id, i.title, i.expected].join(' ').toLowerCase().includes(q));
+    if (!shown.length) return '';
+    const mOk = its.filter(i => i.status === 'ok').length;
+    const mKo = its.filter(i => i.status === 'ko').length;
+    const mPct = Math.round(mOk / its.length * 100);
+    return `<article class="comp-section">
+      <div class="comp-section-head">
+        <span class="phase-code">${idx + 1}</span>
+        <div class="comp-section-info">
+          <b>${esc(m.name)}</b>
+          <small>${its.length} test${its.length > 1 ? 's' : ''} · ${mOk} validé${mOk > 1 ? 's' : ''} · ${mKo} échec${mKo > 1 ? 's' : ''}</small>
+        </div>
+        <div class="phase-progress"><i style="width:${mPct}%;${mPct === 100 ? 'background:var(--green)' : ''}"></i></div>
+        <span class="phase-percent">${mPct}%</span>
+      </div>
+      <div class="comp-table-wrap">
+        <table class="comp-table">
+          <thead><tr><th style="width:30px"></th><th>Test</th><th>Attendu</th><th>Statut</th></tr></thead>
+          <tbody>${shown.map(chkRowHTML).join('')}</tbody>
+        </table>
+      </div>
+    </article>`;
+  }).join('') || '<div class="scope" style="text-align:center;padding:40px">Aucun test ne correspond aux filtres.</div>';
+}
+
+function chkRowHTML(i) {
+  const meta = [i.checkedBy, i.checkedAt].filter(Boolean).join(' · ');
+  const icon = { todo: '○', ok: '✓', ko: '✗' }[i.status];
+  return `<tr class="${i.status === 'ok' ? 'comp-row-done' : ''}">
+    <td><button class="comp-check ${i.status === 'ok' ? 'checked' : ''} ${i.status === 'ko' ? 'ko' : ''}" title="Changer le statut" onclick="cycleCheck('${esc(i.id)}')">${icon}</button></td>
+    <td class="comp-name"><code>${esc(i.id)}</code> ${esc(i.title)}${meta ? '<small class="comp-meta">' + esc(meta) + '</small>' : ''}</td>
+    <td class="comp-note">${esc(i.expected)}</td>
+    <td><span class="comp-badge ${CHECK_CLASS[i.status]}">${CHECK_LABELS[i.status]}</span></td>
+  </tr>`;
+}
+
+window.cycleCheck = id => {
+  const cur = (checkOverrides[id] || {}).status || 'todo';
+  saveCheck(id, CHECK_NEXT[cur]);
+};
+
+function saveCheck(id, status) {
+  const value = status === 'todo' ? null : {
+    status,
+    checkedBy: user.name,
+    checkedAt: new Date().toISOString().slice(0, 10)
+  };
+  if (value) checkOverrides[id] = value;
+  else delete checkOverrides[id];
+
+  if (firebaseReady && checklistDbRef) {
+    // Écrit uniquement ce test (pas tout le noeud) pour ne pas écraser les tests des autres
+    checklistDbRef.child(id).set(value).catch(err => {
+      console.error('Erreur sauvegarde checklist Firebase:', err);
+      localStorage.setItem(CHECK_KEY, JSON.stringify(checkOverrides));
+      renderChecklists();
+    });
+  } else {
+    localStorage.setItem(CHECK_KEY, JSON.stringify(checkOverrides));
+    renderChecklists();
+  }
+  toast(status === 'todo' ? 'Test remis à tester' : `Test marqué « ${CHECK_LABELS[status]} »`);
+}
+
+['chkSearch', 'chkStatusFilter'].forEach(id =>
+  $('#' + id).addEventListener(id === 'chkSearch' ? 'input' : 'change', renderChecklists)
+);
+
+/* ── Démarrage des chargements Markdown ── */
+fillPhaseFilter();
+loadRoadmapMd();
+loadChecklistMd();
