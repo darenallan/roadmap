@@ -4,10 +4,17 @@
  * ══════════════════════════════════════════════════════════════ */
 
 /* ── Configuration ── */
+/* access : 'admin' = tout le tableau de bord + tous les tests
+ *          'testeur' = uniquement les tests (tous les modules)
+ *          'vendeur' | 'acheteur' | 'livreur' = uniquement les tests de ce rôle */
 const USERS = {
-  2252: { name: 'Daren', full: 'Daren Tiendrebeogo', role: 'Développeur principal' },
-  3363: { name: 'Hassan', full: 'Hassan', role: 'Directeur marketing' },
-  8808: { name: 'Youssouf', full: 'Youssouf', role: 'Testeur' }
+  2252: { name: 'Daren', full: 'Daren Tiendrebeogo', role: 'Développeur principal', access: 'admin' },
+  3363: { name: 'Hassan', full: 'Hassan', role: 'Directeur marketing', access: 'admin' },
+  8808: { name: 'Youssouf', full: 'Youssouf', role: 'Testeur', access: 'testeur' },
+  7707: { name: 'Vendeur', full: 'Compte vendeur', role: 'Testeur vendeur', access: 'vendeur' },
+  4404: { name: 'Acheteur', full: 'Compte acheteur', role: 'Testeur acheteur', access: 'acheteur' },
+  5505: { name: 'Livreur', full: 'Compte livreur', role: 'Testeur livreur', access: 'livreur' },
+  1101: { name: 'Coordinateur', full: 'Compte coordinateur', role: 'Testeur coordinateur', access: 'coordinateur' }
 };
 const KEY = 'sanhia-roadmap-integrale-v2';
 const COMP_KEY = 'sanhia-composants-v1';
@@ -125,6 +132,18 @@ function start() {
   render();
   renderComposants();
   renderChecklists();
+  if (user.access !== 'admin') applyTesterMode();
+}
+
+/* ── Mode testeur : accès uniquement à la checklist de tests ── */
+function applyTesterMode() {
+  document.querySelectorAll('[data-go]').forEach(b => {
+    if (b.dataset.go !== 'tests') b.hidden = true;
+  });
+  $('#export').hidden = true;
+  $('#reset').hidden = true;
+  $('#menu').style.display = 'none';
+  document.querySelector('[data-go="tests"]').click();
 }
 
 /* ── Sync Status ── */
@@ -686,17 +705,45 @@ async function loadRoadmapMd() {
   render();
 }
 
-/* Format : "## Module", puis "- [ ] ID | Titre | Attendu" */
+/* Formats acceptés :
+ *   - [ ] ID | Titre | Attendu        (tableau complet)
+ *   - [ ] ID Titre                     (liste simple, sous-tests indentés = suite du texte)
+ * La clé Firebase remplace les points (Firebase refuse « . » dans une clé) : A1.1 -> A1_1 */
 function parseChecklistMd(text) {
   const modules = [];
-  let mod = null;
-  text.split(/\r?\n/).forEach(line => {
+  let mod = null, last = null;
+  const clean = s => s.replace(/\*\*/g, '').replace(/`/g, '').trim();
+  text.split(/\r?\n/).forEach(raw => {
+    const line = raw.replace(/\s+$/, '');
     let m;
     if ((m = line.match(/^## (.+)$/))) {
-      mod = { name: m[1].trim(), items: [] };
+      // "## Nom [acheteur, vendeur]" : rôles qui voient ce module (sans tag = tout le monde)
+      const tag = m[1].match(/^(.*?)\s*\[([^\]]+)\]\s*$/);
+      mod = {
+        name: clean(tag ? tag[1] : m[1]),
+        audiences: tag ? tag[2].split(',').map(s => s.trim().toLowerCase()) : [],
+        items: []
+      };
       modules.push(mod);
-    } else if (mod && (m = line.match(/^- \[[ xX]\] (\S+) \| ([^|]+?) \| (.+)$/))) {
-      mod.items.push({ id: m[1], title: m[2].trim(), expected: m[3].trim(), module: mod.name });
+      last = null;
+    } else if (mod && (m = line.match(/^\s*- \[[ xX]\] (.+)$/))) {
+      const body = m[1].trim();
+      const parts = body.split(' | ');
+      let label, title, expected = '';
+      if (parts.length >= 2) {
+        label = parts[0].trim();
+        title = clean(parts[1]);
+        expected = clean(parts.slice(2).join(' | '));
+      } else {
+        const sp = body.match(/^(\S+)\s+(.+)$/);
+        label = sp ? sp[1] : body;
+        title = clean(sp ? sp[2] : '');
+      }
+      last = { id: label.replace(/[.#$\[\]\/]/g, '_'), label, title, expected, module: mod.name };
+      mod.items.push(last);
+    } else if (last && /^\s{2,}\S/.test(line)) {
+      // ligne indentée sous un test : suite du texte
+      last.title = clean(last.title + ' ' + line.trim());
     }
   });
   return modules.filter(m => m.items.length);
@@ -719,8 +766,15 @@ async function loadChecklistMd() {
  *  Cycle au clic : À tester → Validé → Échec → À tester
  * ══════════════════════════════════════════════════════════════ */
 
+/* Modules visibles pour le rôle connecté */
+function visibleModules() {
+  const access = user ? user.access : '';
+  return checklistModules.filter(m =>
+    ['admin', 'testeur'].includes(access) || !m.audiences.length || m.audiences.includes(access));
+}
+
 function allChecks() {
-  return checklistModules.flatMap(m => m.items.map(it => {
+  return visibleModules().flatMap(m => m.items.map(it => {
     const ov = checkOverrides[it.id] || {};
     return { ...it, status: ov.status || 'todo', checkedBy: ov.checkedBy || '', checkedAt: ov.checkedAt || '' };
   }));
@@ -742,7 +796,8 @@ function renderChecklists() {
   $('#chkBar').style.width = pct + '%';
   $('#chkRing').style.strokeDashoffset = 314 - 314 * pct / 100;
 
-  if (!checklistModules.length) {
+  const modules = visibleModules();
+  if (!modules.length) {
     $('#checklistSections').innerHTML = '<div class="scope" style="text-align:center;padding:40px">Aucune checklist chargée. Vérifie que <code>checklists.md</code> est présent à la racine du site.</div>';
     return;
   }
@@ -750,10 +805,10 @@ function renderChecklists() {
   const q = $('#chkSearch').value.trim().toLowerCase();
   const sf = $('#chkStatusFilter').value;
 
-  $('#checklistSections').innerHTML = checklistModules.map((m, idx) => {
+  $('#checklistSections').innerHTML = modules.map((m, idx) => {
     const its = items.filter(i => i.module === m.name);
     const shown = its.filter(i => (sf === 'all' || i.status === sf) &&
-      [i.id, i.title, i.expected].join(' ').toLowerCase().includes(q));
+      [i.label, i.title, i.expected].join(' ').toLowerCase().includes(q));
     if (!shown.length) return '';
     const mOk = its.filter(i => i.status === 'ok').length;
     const mKo = its.filter(i => i.status === 'ko').length;
@@ -783,8 +838,8 @@ function chkRowHTML(i) {
   const icon = { todo: '○', ok: '✓', ko: '✗' }[i.status];
   return `<tr class="${i.status === 'ok' ? 'comp-row-done' : ''}">
     <td><button class="comp-check ${i.status === 'ok' ? 'checked' : ''} ${i.status === 'ko' ? 'ko' : ''}" title="Changer le statut" onclick="cycleCheck('${esc(i.id)}')">${icon}</button></td>
-    <td class="comp-name"><code>${esc(i.id)}</code> ${esc(i.title)}${meta ? '<small class="comp-meta">' + esc(meta) + '</small>' : ''}</td>
-    <td class="comp-note">${esc(i.expected)}</td>
+    <td class="comp-name"><code>${esc(i.label)}</code> ${esc(i.title)}${meta ? '<small class="comp-meta">' + esc(meta) + '</small>' : ''}</td>
+    <td class="comp-note">${esc(i.expected) || '—'}</td>
     <td><span class="comp-badge ${CHECK_CLASS[i.status]}">${CHECK_LABELS[i.status]}</span></td>
   </tr>`;
 }
